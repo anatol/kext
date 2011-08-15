@@ -814,6 +814,14 @@ fuse_body_audit(struct fuse_ticket *ticket, size_t blen)
         err = (blen == 0) ? 0 : EINVAL;
         break;
 
+    case FUSE_POLL:
+        err = (blen == sizeof(struct fuse_poll_out)) ? 0 : EINVAL;
+        break;
+
+    case FUSE_IOCTL:
+        err = (blen == sizeof(struct fuse_ioctl_out)) ? 0 : EINVAL;
+        break;
+
     default:
         log("fuse4x: opcodes out of sync (%d)\n", opcode);
         panic("fuse4x: opcodes out of sync (%d)", opcode);

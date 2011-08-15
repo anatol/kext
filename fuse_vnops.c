@@ -984,6 +984,36 @@ fuse_vnop_inactive(struct vnop_inactive_args *ap)
     return 0;
 }
 
+/*
+    struct vnop_ioctl_args {
+        struct vnodeop_desc *a_desc;
+        vnode_t a_vp;
+        u_long a_command;
+        caddr_t a_data;
+        int a_fflag;
+        vfs_context_t a_context;
+    };
+*/
+FUSE_VNOP_EXPORT
+int
+fuse_vnop_ioctl(__unused struct vnop_ioctl_args *ap)
+{
+    vnode_t            vp      = ap->a_vp;
+    vfs_context_t      context = ap->a_context;
+
+    fuse_trace_printf_vnop_novp();
+
+    IOLog("fuse4x: fuse_vnop_ioctl\n");
+
+    if (fuse_isdeadfs(vp)) {
+        return EBADF;
+    }
+
+    CHECK_BLANKET_DENIAL(vp, context, ENOENT);
+
+    return ENOTSUP;
+}
+
 #if M_FUSE4X_ENABLE_KQUEUE
 
 #include "fuse_knote.h"
@@ -2935,9 +2965,54 @@ FUSE_VNOP_EXPORT
 int
 fuse_vnop_select(struct vnop_select_args *ap)
 {
+    vnode_t            vp      = ap->a_vp;
+    vfs_context_t      context = ap->a_context;
+
+    struct fuse_dispatcher  fdi;
+    struct fuse_poll_in    *fpi;
+
+    int err = 0;
+
     fuse_trace_printf_vnop_novp();
 
-    return 1;
+    if (fuse_isdeadfs(vp)) {
+        err = EBADF;
+        goto out;
+    }
+
+    // following code should be the same as CHECK_BLANKET_DENIAL
+    if (fuse_blanket_deny(vp, context)) {
+        err = ENOENT;
+        goto out;
+    }
+
+    struct fuse_vnode_data *fvdat = VTOFUD(vp);
+/*
+    fufh_type_t type = FUFH_RDONLY;
+    if (ap->a_which | FWRITE) {
+        type = (ap->a_which | FREAD) ? FUFH_RDWR : FUFH_WRONLY;
+    }
+*/
+    struct fuse_filehandle *fufh = &(fvdat->fufh[FUFH_RDONLY]);
+
+    if (!FUFH_IS_VALID(fufh)) {
+        IOLog("fuse4x: fufh invalid in select [type=%d oc=%d vtype=%d]\n",
+              FUFH_RDONLY, fufh->open_count, vnode_vtype(vp));
+        err = EINVAL;
+        goto out;
+    }
+
+    fdisp_init(&fdi, sizeof(*fpi));
+    fdisp_make_vp(&fdi, FUSE_POLL, vp, context);
+    fpi = fdi.indata;
+    bzero(fpi, sizeof(*fpi));
+    fpi->fh = fufh->fh_id;
+
+    err = fdisp_wait_answ(&fdi);
+
+out:
+    // There is no way to return the error code. If error happend - return 0.
+    return err ? 0 : 1;
 }
 
 /*
@@ -3591,7 +3666,7 @@ struct vnodeopv_entry_desc fuse_vnode_operation_entries[] = {
     { &vnop_getxattr_desc,      (fuse_vnode_op_t) fuse_vnop_getxattr      },
 #endif /* M_FUSE4X_ENABLE_XATTR */
     { &vnop_inactive_desc,      (fuse_vnode_op_t) fuse_vnop_inactive      },
-//    { &vnop_ioctl_desc,         (fuse_vnode_op_t) fuse_vnop_ioctl         },
+    { &vnop_ioctl_desc,         (fuse_vnode_op_t) fuse_vnop_ioctl         },
     { &vnop_link_desc,          (fuse_vnode_op_t) fuse_vnop_link          },
 #if M_FUSE4X_ENABLE_XATTR
     { &vnop_listxattr_desc,     (fuse_vnode_op_t) fuse_vnop_listxattr     },

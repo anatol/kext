@@ -87,6 +87,29 @@ d_select_t fuse_device_select;
 #define fuse_device_select (d_select_t*)enodev
 #endif /* M_FUSE4X_ENABLE_DSELECT */
 
+static int fuse_notify(dev_t dev, enum fuse_notify_code code)
+{
+    switch (code) {
+        case FUSE_NOTIFY_POLL:
+            return fuse_notify_poll(dev, size, cs);
+
+        case FUSE_NOTIFY_INVAL_INODE:
+            return fuse_notify_inval_inode(dev, size, cs);
+
+        case FUSE_NOTIFY_INVAL_ENTRY:
+            return fuse_notify_inval_entry(dev, size, cs);
+
+        case FUSE_NOTIFY_STORE:
+            return fuse_notify_store(dev, size, cs);
+
+        case FUSE_NOTIFY_RETRIEVE:
+            return fuse_notify_retrieve(dev, size, cs);
+
+        default:
+            return -EINVAL;
+    }
+}
+
 static struct cdevsw fuse_device_cdevsw = {
     /* open     */ fuse_device_open,
     /* close    */ fuse_device_close,
@@ -384,6 +407,15 @@ fuse_device_write(dev_t dev, uio_t uio, __unused int ioflag)
     ohead.error = -(ohead.error);
 
     /* end audit */
+
+    /*
+     * Zero oh.unique indicates unsolicited notification message
+     * and error contains notification code.
+     */
+    if (!ohead.unique) {
+        return fuse_notify(dev, ohead.error);
+    }
+
 
     data = fdev->data;
 
