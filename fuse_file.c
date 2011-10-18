@@ -166,8 +166,7 @@ fuse_filehandle_put(vnode_t vp, vfs_context_t context, fufh_type_t fufh_type)
             fuse_ticket_drop(fdi.ticket);
         }
     } else {
-        fuse_insert_callback(fdi.ticket, NULL);
-        fuse_insert_message(fdi.ticket);
+        err = fuse_dispatcher_call_asynchronously(fdi.ticket, NULL);
     }
 
 out:

@@ -57,6 +57,9 @@ do {                                                   \
 struct fuse_ticket;
 struct fuse_data;
 
+// it runs under data->mtx
+// sync callbacks are responsilble for dropping ticket
+// syncronius callback should not do this as the callee might use (and usually does) the ticket object.
 typedef int fuse_callback_t(struct fuse_ticket *ticket, uio_t uio);
 
 struct fuse_ticket {
@@ -118,10 +121,9 @@ struct fuse_data {
     struct fuse_selinfo        d_rsel;
 #endif /* M_FUSE4X_ENABLE_DSELECT */
 
-    lck_mtx_t                 *ms_mtx;
+    // protects ms_head, aw_head
+    lck_mtx_t                 *mtx;
     STAILQ_HEAD(, fuse_ticket) ms_head;
-
-    lck_mtx_t                 *aw_mtx;
     TAILQ_HEAD(, fuse_ticket)  aw_head;
 
     lck_mtx_t                 *ticket_mtx;
@@ -195,12 +197,13 @@ struct fuse_ticket *fuse_ticket_fetch(struct fuse_data *data);
 void fuse_ticket_drop(struct fuse_ticket *ticket);
 void fuse_ticket_drop_invalid(struct fuse_ticket *ticket);
 void fuse_ticket_kill(struct fuse_ticket *ticket);
-void fuse_insert_callback(struct fuse_ticket *ticket, fuse_callback_t *callback);
-void fuse_insert_message(struct fuse_ticket *ticket);
+int fuse_dispatcher_call_asynchronously(struct fuse_ticket *tick, fuse_callback_t *callback);
+void fuse_insert_message(struct fuse_ticket *ticket, fuse_callback_t *callback);
 
 struct fuse_data *fuse_data_alloc(struct proc *p);
 void fuse_data_destroy(struct fuse_data *data);
-bool fuse_data_kill(struct fuse_data *data);
+void fuse_data_kill(struct fuse_data *data);
+void fuse_data_kill_locked(struct fuse_data *data);
 
 struct fuse_dispatcher {
 

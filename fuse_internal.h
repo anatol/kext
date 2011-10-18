@@ -832,8 +832,7 @@ void
 fuse_internal_forget_send(mount_t                 mp,
                           vfs_context_t           context,
                           uint64_t                nodeid,
-                          uint64_t                nlookup,
-                          struct fuse_dispatcher *dispatcher);
+                          uint64_t                nlookup);
 
 void
 fuse_internal_interrupt_send(struct fuse_ticket *ticket);

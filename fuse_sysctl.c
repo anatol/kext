@@ -16,6 +16,7 @@
 
 /* NB: none of these are bigger than unsigned 32-bit. */
 
+//todo: should they be volatile?
 int32_t  fuse_admin_group            = 0;                                  // rw
 int32_t  fuse_allow_other            = 0;                                  // rw
 uint32_t fuse_api_major              = FUSE_KERNEL_VERSION;                // r

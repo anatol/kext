@@ -22,7 +22,7 @@
 static struct fuse_ticket *fuse_ticket_alloc(struct fuse_data *data);
 static void                fuse_ticket_refresh(struct fuse_ticket *ticket);
 static void                fuse_ticket_destroy(struct fuse_ticket *ticket);
-static int                 fuse_ticket_wait_answer(struct fuse_ticket *ticket);
+static __inline__ int      fuse_ticket_wait_answer(struct fuse_ticket *ticket);
 static __inline__ int      fuse_ticket_aw_pull_uio(struct fuse_ticket *ticket,
                                                uio_t uio);
 static __inline__ void     fuse_push_freeticks(struct fuse_ticket *ticket);
@@ -179,7 +179,7 @@ fuse_ticket_alloc(struct fuse_data *data)
     bzero(ticket, sizeof(struct fuse_ticket));
 
     fuse_lck_mtx_lock(data->ticket_mtx);
-    ticket->unique = data->ticketer++;
+    ticket->unique = data->ticketer++; // todo maybe ticketer should be volatile and we should use OSIncrementAtomic64 here?
     fuse_lck_mtx_unlock(data->ticket_mtx);
 
     ticket->data = data;
@@ -187,7 +187,6 @@ fuse_ticket_alloc(struct fuse_data *data)
     fiov_init(&ticket->ms_fiov, sizeof(struct fuse_in_header));
     ticket->ms_type = FT_M_FIOV;
 
-    ticket->aw_mtx = lck_mtx_alloc_init(fuse_lock_group, fuse_lock_attr);
     fiov_init(&ticket->aw_fiov, 0);
     ticket->aw_type = FT_A_FIOV;
 
@@ -221,9 +220,6 @@ static void
 fuse_ticket_destroy(struct fuse_ticket *ticket)
 {
     fiov_teardown(&ticket->ms_fiov);
-
-    lck_mtx_free(ticket->aw_mtx, fuse_lock_group);
-    ticket->aw_mtx = NULL;
     fiov_teardown(&ticket->aw_fiov);
 
     FUSE_OSFree(ticket, sizeof(struct fuse_ticket), fuse_malloc_tag);
@@ -231,73 +227,6 @@ fuse_ticket_destroy(struct fuse_ticket *ticket)
     OSDecrementAtomic((SInt32 *)&fuse_tickets_current);
 }
 
-static int
-fuse_ticket_wait_answer(struct fuse_ticket *ticket)
-{
-    int err = 0;
-    struct fuse_data *data = ticket->data;
-
-    fuse_lck_mtx_lock(ticket->aw_mtx);
-
-    if (ticket->answered) {
-        goto out;
-    }
-
-    if (data->dead || data->destroyed) {
-        err = ENOTCONN;
-        ticket->answered = true;
-        goto out;
-    }
-    if (fuse_ticket_opcode(ticket) == FUSE_DESTROY)
-        data->destroyed = true;
-
-#if M_FUSE4X_ENABLE_BIGLOCK
-    // release biglock before going to sleep:
-    // 1) it reduces biglock contention - we really have no reason to keep the lock and prevent other requests from
-    //    processing, the biglock protects vnode operations only.
-    // 2) in case if a fuse daemon performs some non-fuse filesystem operations it may lead to fsync on the *fuse*
-    //    filesystem. And this leads to deadlock. See https://trac.macports.org/ticket/30129 (the second, deadlock issue).
-    fuse_biglock_unlock(data->biglock);
-#endif
-
-    err = fuse_msleep(ticket, ticket->aw_mtx, PCATCH, "fu_ans", data->daemon_timeout_p);
-
-#if M_FUSE4X_ENABLE_BIGLOCK
-    fuse_biglock_lock(data->biglock);
-#endif
-
-    if (err == EAGAIN) { /* same as EWOULDBLOCK */
-        if (fuse_data_kill(data)) {
-            struct vfsstatfs *statfs = vfs_statfs(data->mp);
-            log("fuse4x: daemon (pid=%d, mountpoint=%s) did not respond in %ld seconds. Mark the filesystem as dead.\n",
-                    data->daemonpid, statfs->f_mntonname, data->daemon_timeout.tv_sec);
-        }
-
-        err = ENOTCONN;
-        ticket->answered = true;
-
-        goto out;
-    }
-
-#if M_FUSE4X_ENABLE_INTERRUPT
-    else if (err == EINTR) {
-       /*
-        * XXX: Stop gap! I really need to finish interruption plumbing.
-        */
-       fuse_internal_interrupt_send(ticket);
-    }
-#endif
-
-out:
-    fuse_lck_mtx_unlock(ticket->aw_mtx);
-
-    if (!(err || ticket->answered)) {
-        log("fuse4x: requester was woken up but still no answer");
-        err = ENXIO;
-    }
-
-    return err;
-}
 
 static __inline__
 int
@@ -382,8 +311,7 @@ fuse_data_alloc(struct proc *p)
     data->destroyed     = false;
     data->dead          = false;
 
-    data->ms_mtx        = lck_mtx_alloc_init(fuse_lock_group, fuse_lock_attr);
-    data->aw_mtx        = lck_mtx_alloc_init(fuse_lock_group, fuse_lock_attr);
+    data->mtx           = lck_mtx_alloc_init(fuse_lock_group, fuse_lock_attr);
     data->ticket_mtx    = lck_mtx_alloc_init(fuse_lock_group, fuse_lock_attr);
 
     STAILQ_INIT(&data->ms_head);
@@ -409,13 +337,8 @@ fuse_data_alloc(struct proc *p)
 void
 fuse_data_destroy(struct fuse_data *data)
 {
-    struct fuse_ticket *ticket;
-
-    lck_mtx_free(data->ms_mtx, fuse_lock_group);
-    data->ms_mtx = NULL;
-
-    lck_mtx_free(data->aw_mtx, fuse_lock_group);
-    data->aw_mtx = NULL;
+    lck_mtx_free(data->mtx, fuse_lock_group);
+    data->mtx = NULL;
 
     lck_mtx_free(data->ticket_mtx, fuse_lock_group);
     data->ticket_mtx = NULL;
@@ -430,6 +353,7 @@ fuse_data_destroy(struct fuse_data *data)
     data->biglock = NULL;
 #endif
 
+    struct fuse_ticket *ticket;
     while ((ticket = fuse_pop_allticks(data))) {
         fuse_ticket_destroy(ticket);
     }
@@ -439,16 +363,24 @@ fuse_data_destroy(struct fuse_data *data)
     FUSE_OSFree(data, sizeof(struct fuse_data), fuse_malloc_tag);
 }
 
+void
+fuse_data_kill_locked(struct fuse_data *data)
+{
+    fuse_lck_mtx_lock(data->mtx);
+    fuse_data_kill(data);
+    fuse_lck_mtx_unlock(data->mtx);
+}
 
-bool
+// have to be protected by data->mtx
+void
 fuse_data_kill(struct fuse_data *data)
 {
     fuse_trace_printf_func();
 
-    fuse_lck_mtx_lock(data->ms_mtx);
     if (data->dead) {
-        fuse_lck_mtx_unlock(data->ms_mtx);
-        return false;
+        fuse_assert(TAILQ_EMPTY(&data->aw_head), "data is killed but aw_head is not empty");
+        fuse_assert(STAILQ_EMPTY(&data->ms_head), "data is killed but ms_head is not empty");
+        return;
     }
 
     data->dead = true;
@@ -456,15 +388,23 @@ fuse_data_kill(struct fuse_data *data)
 #if M_FUSE4X_ENABLE_DSELECT
     selwakeup((struct selinfo*)&data->d_rsel);
 #endif /* M_FUSE4X_ENABLE_DSELECT */
-    fuse_lck_mtx_unlock(data->ms_mtx);
+
+    // kill all tickets awaiting answers
+    struct fuse_ticket *ticket;
+    TAILQ_FOREACH(ticket, &data->aw_head, aw_link) {
+        ticket->answered = true;
+        ticket->aw_errno = ENOTCONN;
+        fuse_wakeup(ticket);
+    }
+    TAILQ_INIT(&data->aw_head);
+    fuse_assert(TAILQ_EMPTY(&data->aw_head), "we just removed all tickets from aw_head");
 
     fuse_lck_mtx_lock(data->ticket_mtx);
     fuse_wakeup(&data->ticketer);
     fuse_lck_mtx_unlock(data->ticket_mtx);
-
-    return true;
 }
 
+// have to be locked by data->ticket_mtx
 static __inline__
 void
 fuse_push_freeticks(struct fuse_ticket *ticket)
@@ -474,6 +414,7 @@ fuse_push_freeticks(struct fuse_ticket *ticket)
     ticket->data->freeticket_counter++;
 }
 
+// have to be locked by data->ticket_mtx
 static __inline__
 struct fuse_ticket *
 fuse_pop_freeticks(struct fuse_data *data)
@@ -493,6 +434,7 @@ fuse_pop_freeticks(struct fuse_data *data)
     return ticket;
 }
 
+// have to be locked by data->ticket_mtx
 static __inline__
 void
 fuse_push_allticks(struct fuse_ticket *ticket)
@@ -501,6 +443,7 @@ fuse_push_allticks(struct fuse_ticket *ticket)
                       alltickets_link);
 }
 
+// have to be locked by data->ticket_mtx
 static __inline__
 void
 fuse_remove_allticks(struct fuse_ticket *ticket)
@@ -509,6 +452,7 @@ fuse_remove_allticks(struct fuse_ticket *ticket)
     TAILQ_REMOVE(&ticket->data->alltickets_head, ticket, alltickets_link);
 }
 
+// have to be locked by data->ticket_mtx
 static struct fuse_ticket *
 fuse_pop_allticks(struct fuse_data *data)
 {
@@ -545,9 +489,8 @@ fuse_ticket_fetch(struct fuse_data *data)
         }
     }
 
-    if (!data->inited && data->ticketer > 1) {
-        err = fuse_msleep(&data->ticketer, data->ticket_mtx, PCATCH | PDROP,
-                          "fu_ini", 0);
+    if (!data->inited && (data->ticketer > 1)) {
+        err = fuse_msleep(&data->ticketer, data->ticket_mtx, PCATCH | PDROP, "fu_ticketer", 0);
     } else {
         if ((fuse_max_tickets != 0) &&
             ((data->ticketer - data->deadticket_counter) > fuse_max_tickets)) {
@@ -557,7 +500,7 @@ fuse_ticket_fetch(struct fuse_data *data)
     }
 
     if (err) {
-        fuse_data_kill(data);
+        fuse_data_kill_locked(data);
     }
 
     return ticket;
@@ -603,44 +546,27 @@ fuse_ticket_drop_invalid(struct fuse_ticket *ticket)
     }
 }
 
+// have to be protected with fuse_data->mtx
 void
-fuse_insert_callback(struct fuse_ticket *ticket, fuse_callback_t *callback)
+fuse_insert_message(struct fuse_ticket *ticket, fuse_callback_t *callback)
 {
-    struct fuse_data *data = ticket->data;
-
-    if (data->dead || data->destroyed) {
-        return;
-    }
-
-    ticket->aw_callback = callback;
-
-    fuse_lck_mtx_lock(data->aw_mtx);
-    TAILQ_INSERT_TAIL(&data->aw_head, ticket, aw_link);
-    fuse_lck_mtx_unlock(data->aw_mtx);
-}
-
-void
-fuse_insert_message(struct fuse_ticket *ticket)
-{
-    struct fuse_data *data = ticket->data;
-
     if (ticket->dirty) {
         panic("fuse4x: ticket reused without being refreshed");
     }
 
+    struct fuse_data *data = ticket->data;
+
+    ticket->aw_callback = callback;
+
+    TAILQ_INSERT_TAIL(&data->aw_head, ticket, aw_link);
+
     ticket->dirty = true;
 
-    if (data->dead || data->destroyed) {
-        return;
-    }
-
-    fuse_lck_mtx_lock(data->ms_mtx);
     STAILQ_INSERT_TAIL(&data->ms_head, ticket, ms_link);
     fuse_wakeup_one((caddr_t)data);
 #if M_FUSE4X_ENABLE_DSELECT
     selwakeup((struct selinfo*)&data->d_rsel);
 #endif /* M_FUSE4X_ENABLE_DSELECT */
-    fuse_lck_mtx_unlock(data->ms_mtx);
 }
 
 static int
@@ -648,10 +574,6 @@ fuse_body_audit(struct fuse_ticket *ticket, size_t blen)
 {
     int err = 0;
     enum fuse_opcode opcode;
-
-    if (ticket->data->dead) {
-        return ENOTCONN;
-    }
 
     opcode = fuse_ticket_opcode(ticket);
 
@@ -661,7 +583,7 @@ fuse_body_audit(struct fuse_ticket *ticket, size_t blen)
         break;
 
     case FUSE_FORGET:
-        panic("fuse4x: a callback has been intalled for FUSE_FORGET");
+        panic("fuse4x: a callback has been installed for FUSE_FORGET");
         break;
 
     case FUSE_GETATTR:
@@ -860,24 +782,15 @@ static int
 fuse_standard_callback(struct fuse_ticket *ticket, uio_t uio)
 {
     int err = 0;
-    bool dropflag = false;
 
     err = fuse_ticket_pull(ticket, uio);
 
-    fuse_lck_mtx_lock(ticket->aw_mtx);
-
     if (ticket->answered) {
-        dropflag = true;
+        fuse_ticket_drop(ticket);
     } else {
         ticket->answered = true;
         ticket->aw_errno = err;
         fuse_wakeup(ticket);
-    }
-
-    fuse_lck_mtx_unlock(ticket->aw_mtx);
-
-    if (dropflag) {
-        fuse_ticket_drop(ticket);
     }
 
     return err;
@@ -892,11 +805,8 @@ fuse_dispatcher_make(struct fuse_dispatcher *dispatcher,
 {
     struct fuse_data *data = fuse_get_mpdata(mp);
 
-    if (dispatcher->ticket) {
-        fuse_ticket_refresh(dispatcher->ticket);
-    } else {
-        dispatcher->ticket = fuse_ticket_fetch(data);
-    }
+    fuse_assert(!dispatcher->ticket, "dispatcher should not have predefined ticket");
+    dispatcher->ticket = fuse_ticket_fetch(data);
 
     if (!dispatcher->ticket) {
         panic("fuse4x: fuse_ticket_fetch() failed");
@@ -920,13 +830,9 @@ fuse_dispatcher_make_canfail(struct fuse_dispatcher *dispatcher,
 
     struct fuse_data *data = fuse_get_mpdata(mp);
 
-    if (dispatcher->ticket) {
-        fuse_ticket_refresh(dispatcher->ticket);
-    } else {
-        dispatcher->ticket = fuse_ticket_fetch(data);
-    }
+    dispatcher->ticket = fuse_ticket_fetch(data);
 
-    if (dispatcher->ticket == 0) {
+    if (!dispatcher->ticket) {
         panic("fuse4x: fuse_ticket_fetch() failed");
     }
 
@@ -966,28 +872,108 @@ fuse_dispatcher_make_vp_canfail(struct fuse_dispatcher *dispatcher,
     return fuse_dispatcher_make_canfail(dispatcher, op, vnode_mount(vp), VTOI(vp), context);
 }
 
-/* The function returns 0 in case of success and errorcode in case of error */
+int fuse_dispatcher_call_asynchronously(struct fuse_ticket *ticket, fuse_callback_t *callback) {
+    struct fuse_data *data = ticket->data;
+
+    fuse_lck_mtx_lock(data->mtx);
+
+    if (data->dead || data->destroyed) {
+        fuse_lck_mtx_unlock(data->mtx);
+        return ENOTCONN;
+    }
+
+    fuse_insert_message(ticket, callback);
+
+    fuse_lck_mtx_unlock(data->mtx);
+
+    return 0;
+}
+
+/* The function returns 0 in case of success and errorcode in case of error
+ * Note: it is a responsibility of callee to drop the ticket.
+ */
 int
 fuse_dispatcher_wait_answer(struct fuse_dispatcher *dispatcher)
 {
     int err = 0;
     struct fuse_ticket *ticket = dispatcher->ticket;
+    struct fuse_data *data = ticket->data;
+
+    fuse_lck_mtx_lock(data->mtx);
+    fuse_assert(!ticket->answered, "ticket %p already answered", ticket);
+
+    if (data->dead || data->destroyed) {
+        ticket->answered = true;
+        fuse_lck_mtx_unlock(data->mtx);
+        return ENOTCONN;
+    }
+
+    if (fuse_ticket_opcode(ticket) == FUSE_DESTROY)
+        data->destroyed = true;
 
     dispatcher->answer_errno = 0;
-    fuse_insert_callback(ticket, fuse_standard_callback);
-    fuse_insert_message(ticket);
+    fuse_insert_message(ticket, fuse_standard_callback);
 
-    if ((err = fuse_ticket_wait_answer(ticket))) { /* interrupted */
-        fuse_lck_mtx_lock(ticket->aw_mtx);
+#if M_FUSE4X_ENABLE_BIGLOCK
+    // release biglock before going to sleep:
+    // 1) it reduces biglock contention - we really have no reason to keep the lock and prevent other requests from
+    //    processing, the biglock protects vnode operations only.
+    // 2) in case if a fuse daemon performs some non-fuse filesystem operations it may lead to fsync on the *fuse*
+    //    filesystem. And this leads to deadlock. See https://trac.macports.org/ticket/30129 (the second, deadlock issue).
+    fuse_biglock_unlock(data->biglock);
+#endif
 
+    err = fuse_msleep(ticket, data->mtx, PCATCH, "fu_ans", data->daemon_timeout_p);
+
+#if M_FUSE4X_ENABLE_BIGLOCK
+    fuse_biglock_lock(data->biglock);
+#endif
+
+    if (data->dead) {
+        fuse_lck_mtx_unlock(data->mtx);
+        err = ENOTCONN;
+        ticket->answered = true;
+        goto out;
+    }
+
+    if (err == EAGAIN) { /* same as EWOULDBLOCK */
+        fuse_data_kill(data);
+        fuse_lck_mtx_unlock(data->mtx);
+
+        struct vfsstatfs *statfs = vfs_statfs(data->mp);
+        log("fuse4x: daemon (pid=%d, mountpoint=%s) did not respond in %ld seconds. Mark the filesystem as dead.\n",
+            data->daemonpid, statfs->f_mntonname, data->daemon_timeout.tv_sec);
+
+        err = ENOTCONN;
+        ticket->answered = true;
+
+        goto out;
+    }
+
+    fuse_lck_mtx_unlock(data->mtx);
+
+#if M_FUSE4X_ENABLE_INTERRUPT
+    if (err == EINTR) {
+        /*
+         * XXX: Stop gap! I really need to finish interruption plumbing.
+         */
+        fuse_internal_interrupt_send(ticket);
+    }
+#endif
+
+out:
+    if (!(err || ticket->answered)) {
+        log("fuse4x: requester was woken up but still no answer");
+        err = ENXIO;
+    }
+
+    if (err) { /* interrupted */
         if (ticket->answered) {
             /* IPC: already answered */
-            fuse_lck_mtx_unlock(ticket->aw_mtx);
-            goto out;
+            goto drop_ticket;
         } else {
             /* IPC: explicitly setting to answered */
             ticket->answered = true;
-            fuse_lck_mtx_unlock(ticket->aw_mtx);
             return err;
         }
     }
@@ -999,7 +985,7 @@ fuse_dispatcher_wait_answer(struct fuse_dispatcher *dispatcher)
         /* Explicitly EIO-ing */
 
         err = EIO;
-        goto out;
+        goto drop_ticket;
     }
 
     if ((err = ticket->aw_ohead.error)) {
@@ -1007,7 +993,7 @@ fuse_dispatcher_wait_answer(struct fuse_dispatcher *dispatcher)
         /* Explicitly setting status */
 
         dispatcher->answer_errno = err;
-        goto out;
+        goto drop_ticket;
     }
 
     dispatcher->answer = ticket->aw_fiov.base;
@@ -1015,7 +1001,7 @@ fuse_dispatcher_wait_answer(struct fuse_dispatcher *dispatcher)
 
     return 0;
 
-out:
+drop_ticket:
     fuse_ticket_drop(ticket);
 
     return err;

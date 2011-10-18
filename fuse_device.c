@@ -51,26 +51,6 @@ fuse_device_close_final(fuse_device_t fdev)
 }
 
 
-static __inline__
-void
-fuse_reject_answers(struct fuse_data *data)
-{
-    struct fuse_ticket *ticket;
-
-    fuse_lck_mtx_lock(data->aw_mtx);
-
-    TAILQ_FOREACH(ticket, &data->aw_head, aw_link) {
-        fuse_lck_mtx_lock(ticket->aw_mtx);
-        ticket->answered = true;
-        ticket->aw_errno = ENOTCONN;
-        fuse_wakeup(ticket);
-        fuse_lck_mtx_unlock(ticket->aw_mtx);
-    }
-    TAILQ_INIT(&data->aw_head); // Remove all tickets from the queue
-
-    fuse_lck_mtx_unlock(data->aw_mtx);
-}
-
 /* /dev/fuseN implementation */
 
 d_open_t   fuse_device_open;
@@ -202,24 +182,13 @@ fuse_device_close(dev_t dev, __unused int flags, __unused int devtype,
         panic("fuse4x: no device private data in device_close");
     }
 
-    fuse_data_kill(data);
-
-    fuse_lck_mtx_lock(fdev->mtx);
-
+    fuse_data_kill_locked(data);
     data->opened = false;
-
-    fuse_reject_answers(data);
-
-#if M_FUSE4X_ENABLE_DSELECT
-    selwakeup((struct selinfo*)&data->d_rsel);
-#endif /* M_FUSE4X_ENABLE_DSELECT */
 
     if (!data->mounted) {
         /* We're not mounted. Can destroy mpdata. */
         fuse_device_close_final(fdev);
     }
-
-    fuse_lck_mtx_unlock(fdev->mtx);
 
     fuse_lck_mtx_lock(fuse_device_mutex);
 
@@ -256,39 +225,33 @@ fuse_device_read(dev_t dev, uio_t uio, int ioflag)
 
     data = fdev->data;
 
-    fuse_lck_mtx_lock(data->ms_mtx);
-
-    /* The read loop (outgoing messages to the user daemon). */
-
-again:
+    fuse_lck_mtx_lock(data->mtx);
     if (data->dead) {
-        fuse_lck_mtx_unlock(data->ms_mtx);
+        fuse_lck_mtx_unlock(data->mtx);
         return ENODEV;
     }
 
-    if ((ticket = STAILQ_FIRST(&data->ms_head))) {
+    /* The read loop (outgoing messages to the user daemon). */
+again:
+    ticket = STAILQ_FIRST(&data->ms_head);
+    if (ticket) {
         STAILQ_REMOVE_HEAD(&data->ms_head, ms_link);
     } else {
         if (ioflag & FNONBLOCK) {
-            fuse_lck_mtx_unlock(data->ms_mtx);
+            fuse_lck_mtx_unlock(data->mtx);
             return EAGAIN;
         }
-        err = fuse_msleep(data, data->ms_mtx, PCATCH, "fu_msg", NULL);
+        err = fuse_msleep(data, data->mtx, PCATCH, "fu_msg", NULL);
+        if (data->dead)
+            err = ENODEV;
+
         if (err) {
-            fuse_lck_mtx_unlock(data->ms_mtx);
-            return (data->dead ? ENODEV : err);
+            fuse_lck_mtx_unlock(data->mtx);
+            return err;
         }
         goto again;
     }
-
-    fuse_lck_mtx_unlock(data->ms_mtx);
-
-    if (data->dead) {
-         if (ticket) {
-             fuse_ticket_drop_invalid(ticket);
-         }
-         return ENODEV;
-    }
+    fuse_lck_mtx_unlock(data->mtx);
 
     switch (ticket->ms_type) {
 
@@ -310,7 +273,7 @@ again:
 
     for (i = 0; buf[i]; i++) {
         if (uio_resid(uio) < (user_ssize_t)buflen[i]) {
-            data->dead = true;
+            fuse_data_kill_locked(data);
             err = ENODEV;
             break;
         }
@@ -387,29 +350,29 @@ fuse_device_write(dev_t dev, uio_t uio, __unused int ioflag)
 
     data = fdev->data;
 
-    fuse_lck_mtx_lock(data->aw_mtx);
+    fuse_lck_mtx_lock(data->mtx);
 
     TAILQ_FOREACH_SAFE(ticket, &data->aw_head, aw_link, x_ticket) {
         if (ticket->unique == ohead.unique) {
             found = true;
-            TAILQ_REMOVE(&ticket->data->aw_head, ticket, aw_link);
+            TAILQ_REMOVE(&data->aw_head, ticket, aw_link);
             break;
         }
     }
-
-    fuse_lck_mtx_unlock(data->aw_mtx);
 
     if (found) {
         if (ticket->aw_callback) {
             memcpy(&ticket->aw_ohead, &ohead, sizeof(ohead));
             err = ticket->aw_callback(ticket, uio);
         } else {
+            // It async message and nobody waits for this ticket, so
             fuse_ticket_drop(ticket);
-            return err;
         }
     } else {
         /* ticket has no response callback */
     }
+
+    fuse_lck_mtx_unlock(data->mtx);
 
     return err;
 }
@@ -556,7 +519,7 @@ fuse_device_ioctl(dev_t dev, u_long cmd, caddr_t udata,
 
     switch (cmd) {
     case FUSEDEVIOCSETDAEMONDEAD:
-        fuse_data_kill(data);
+        fuse_data_kill_locked(data);
         ret = 0;
         break;
     default:
@@ -593,13 +556,13 @@ fuse_device_select(dev_t dev, int events, void *wql, struct proc *p)
     }
 
     if (events & (POLLIN | POLLRDNORM)) {
-        fuse_lck_mtx_lock(data->ms_mtx);
+        fuse_lck_mtx_lock(data->mtx);
         if (data->dead || !STAILQ_EMPTY(&data->ms_head)) {
             revents |= (events & (POLLIN | POLLRDNORM));
         } else {
             selrecord((proc_t)p, (struct selinfo*)&data->d_rsel, wql);
         }
-        fuse_lck_mtx_unlock(data->ms_mtx);
+        fuse_lck_mtx_unlock(data->mtx);
     }
 
     if (events & (POLLOUT | POLLWRNORM)) {
@@ -628,8 +591,6 @@ fuse_device_kill(int unit, struct proc *p)
         return ENOENT;
     }
 
-    fuse_lck_mtx_lock(fdev->mtx);
-
     struct fuse_data *data = fdev->data;
     if (data) {
         error = EPERM;
@@ -639,17 +600,13 @@ fuse_device_kill(int unit, struct proc *p)
                 (fuse_match_cred(data->daemoncred, request_cred) == 0)) {
 
                 /* The following can block. */
-                fuse_data_kill(data);
-
-                fuse_reject_answers(data);
+                fuse_data_kill_locked(data);
 
                 error = 0;
             }
             kauth_cred_unref(&request_cred);
         }
     }
-
-    fuse_lck_mtx_unlock(fdev->mtx);
 
     return error;
 }

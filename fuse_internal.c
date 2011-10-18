@@ -357,8 +357,7 @@ fuse_internal_fsync(vnode_t                 vp,
             fuse_ticket_drop(dispatcher->ticket);
         }
     } else {
-        fuse_insert_callback(dispatcher->ticket, fuse_internal_fsync_callback);
-        fuse_insert_message(dispatcher->ticket);
+        fuse_dispatcher_call_asynchronously(dispatcher->ticket, fuse_internal_fsync_callback);
     }
 
 out:
@@ -1349,7 +1348,7 @@ fuse_internal_newentry_core(vnode_t                 dvp,
 
     err = fuse_vget_i(vpp, 0 /* flags */, feo, cnp, dvp, mp, context);
     if (err) {
-        fuse_internal_forget_send(mp, context, feo->nodeid, 1, dispatcher);
+        fuse_internal_forget_send(mp, context, feo->nodeid, 1);
         return err;
     }
 
@@ -1395,12 +1394,8 @@ __private_extern__
 int
 fuse_internal_forget_callback(struct fuse_ticket *ticket, __unused uio_t uio)
 {
-    struct fuse_dispatcher fdi;
-
-    fdi.ticket = ticket;
-
     fuse_internal_forget_send(ticket->data->mp, NULL,
-        ((struct fuse_in_header *)ticket->ms_fiov.base)->nodeid, 1, &fdi);
+        ((struct fuse_in_header *)ticket->ms_fiov.base)->nodeid, 1);
 
     return 0;
 }
@@ -1410,24 +1405,26 @@ void
 fuse_internal_forget_send(mount_t                 mp,
                           vfs_context_t           context,
                           uint64_t                nodeid,
-                          uint64_t                nlookup,
-                          struct fuse_dispatcher *dispatcher)
+                          uint64_t                nlookup)
 {
+    struct fuse_dispatcher fdi;
     struct fuse_forget_in *ffi;
+
+    bzero(&fdi, sizeof(struct fuse_dispatcher));
 
     /*
      * KASSERT(nlookup > 0, ("zero-times forget for vp #%llu",
      *         (long long unsigned) nodeid));
      */
 
-    fuse_dispatcher_init(dispatcher, sizeof(*ffi));
-    fuse_dispatcher_make(dispatcher, FUSE_FORGET, mp, nodeid, context);
+    fuse_dispatcher_init(&fdi, sizeof(*ffi));
+    fuse_dispatcher_make(&fdi, FUSE_FORGET, mp, nodeid, context);
 
-    ffi = dispatcher->indata;
+    ffi = fdi.indata;
     ffi->nlookup = nlookup;
 
-    dispatcher->ticket->invalid = true;
-    fuse_insert_message(dispatcher->ticket);
+    fdi.ticket->invalid = true;
+    fuse_dispatcher_call_asynchronously(fdi.ticket, NULL);
 }
 
 __private_extern__
@@ -1437,13 +1434,15 @@ fuse_internal_interrupt_send(struct fuse_ticket *ticket)
     struct fuse_dispatcher fdi;
     struct fuse_interrupt_in *fii;
 
-    fdi.ticket = ticket;
+    bzero(&fdi, sizeof(struct fuse_dispatcher));
+
+    // todo check for memory leaks here....
     fuse_dispatcher_init(&fdi, sizeof(*fii));
     fuse_dispatcher_make(&fdi, FUSE_INTERRUPT, ticket->data->mp, (uint64_t)0, NULL);
     fii = fdi.indata;
     fii->unique = ticket->unique;
     fdi.ticket->invalid = true;
-    fuse_insert_message(fdi.ticket);
+    fuse_dispatcher_call_asynchronously(fdi.ticket, NULL);
 }
 
 __private_extern__
@@ -1543,10 +1542,8 @@ out:
         fuse_data_kill(data);
     }
 
-    fuse_lck_mtx_lock(data->ticket_mtx);
     data->inited = true;
     fuse_wakeup(&data->ticketer);
-    fuse_lck_mtx_unlock(data->ticket_mtx);
 
     return 0;
 }
@@ -1566,8 +1563,7 @@ fuse_send_init(struct fuse_data *data, vfs_context_t context)
     fiii->max_readahead = data->iosize * 16;
     fiii->flags = 0;
 
-    fuse_insert_callback(fdi.ticket, fuse_internal_init_callback);
-    fuse_insert_message(fdi.ticket);
+    fuse_dispatcher_call_asynchronously(fdi.ticket, fuse_internal_init_callback);
 
     return 0;
 }

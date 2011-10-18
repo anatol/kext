@@ -342,8 +342,8 @@ fuse_vnop_create(struct vnop_create_args *ap)
     struct fuse_create_in  *fci;
     struct fuse_mknod_in    fmni;
     struct fuse_entry_out  *feo;
-    struct fuse_dispatcher  fdi;
-    struct fuse_dispatcher *dispatcher = &fdi;
+    struct fuse_dispatcher  dispatcher_struct;
+    struct fuse_dispatcher *dispatcher = &dispatcher_struct;
 
     int err;
     bool gone_good_old = false;
@@ -366,7 +366,7 @@ fuse_vnop_create(struct vnop_create_args *ap)
         return EPERM;
     }
 
-    bzero(&fdi, sizeof(fdi));
+    bzero(&dispatcher_struct, sizeof(dispatcher_struct));
 
     data = fuse_get_mpdata(mp);
 
@@ -428,19 +428,20 @@ bringup:
               feo, mp, dvp, context, NULL /* oflags */);
     if (err) {
        if (gone_good_old) {
-           fuse_internal_forget_send(mp, context, feo->nodeid, 1, dispatcher);
+           fuse_internal_forget_send(mp, context, feo->nodeid, 1);
        } else {
            struct fuse_release_in *fri;
            uint64_t nodeid = feo->nodeid;
            uint64_t fh_id = ((struct fuse_open_out *)(feo + 1))->fh;
 
+           dispatcher->ticket = NULL;
            fuse_dispatcher_init(dispatcher, sizeof(*fri));
            fuse_dispatcher_make(dispatcher, FUSE_RELEASE, mp, nodeid, context);
            fri = dispatcher->indata;
            fri->fh = fh_id;
            fri->flags = OFLAGS(mode);
-           fuse_insert_callback(dispatcher->ticket, fuse_internal_forget_callback);
-           fuse_insert_message(dispatcher->ticket);
+
+           fuse_dispatcher_call_asynchronously(dispatcher->ticket, fuse_internal_forget_callback);
        }
        return err;
     }
@@ -728,7 +729,8 @@ fuse_vnop_getattr(struct vnop_getattr_args *ap)
 
     if (!data->inited) {
         if (!vnode_isvroot(vp)) {
-            fuse_data_kill(data);
+            fuse_data_kill_locked(data);
+
             err = ENOTCONN;
             return err;
         } else {
@@ -1500,7 +1502,7 @@ out:
         if (err) { /* Found inode; exit with no vnode. */
             if (op == FUSE_LOOKUP) {
                 fuse_internal_forget_send(vnode_mount(dvp), context,
-                                          nodeid, 1, &fdi);
+                                          nodeid, 1);
             }
             return err;
         } else {
@@ -2619,10 +2621,8 @@ fuse_vnop_reclaim(struct vnop_reclaim_args *ap)
     } /* fufh loop */
 
     if ((!fuse_isdeadfs(vp)) && (fvdat->nlookup)) {
-        struct fuse_dispatcher fdi;
-        fdi.ticket = NULL;
         fuse_internal_forget_send(vnode_mount(vp), context, VTOI(vp),
-                                  fvdat->nlookup, &fdi);
+                                  fvdat->nlookup);
     }
 
     fuse_vncache_purge(vp);

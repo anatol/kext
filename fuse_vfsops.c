@@ -625,7 +625,7 @@ fuse_vfsop_unmount(mount_t mp, int mntflags, vfs_context_t context)
     } else if (!data->inited) {
         flags |= FORCECLOSE;
         log("fuse4x: forcing unmount on not-yet-alive file system\n");
-        fuse_data_kill(data);
+        fuse_data_kill_locked(data);
     }
 
     fuse_rootvp = data->rootvp;
@@ -667,7 +667,7 @@ fuse_vfsop_unmount(mount_t mp, int mntflags, vfs_context_t context)
         fuse_ticket_drop(fdi.ticket);
     }
 
-    fuse_data_kill(data);
+    fuse_data_kill_locked(data);
 
 alreadydead:
 

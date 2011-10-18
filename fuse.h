@@ -87,6 +87,17 @@ extern lck_mtx_t *fuse_log_lock;
 #define fuse_trace_printf_vnop_novp() {}
 #endif
 
+#define fuse_assert(condition, fmt, ...) { \
+    if (!(condition)) { \
+        log("assert(" __STRINGIFY(condition) ") %s@%d by %d: " fmt "\n", __FUNCTION__, __LINE__, proc_selfpid(), ## __VA_ARGS__); \
+    } \
+}
+
+#define fuse_panic(fmt, ...) { \
+    log("assert %s@%d by %d: " fmt "\n", __FUNCTION__, __LINE__, proc_selfpid(), ## __VA_ARGS__); \
+}
+
+
 #ifdef FUSE_TRACE_MSLEEP
 
 #define fuse_msleep(chan, mtx, pri, wmesg, ts)                                                        \
