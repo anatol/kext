@@ -161,7 +161,7 @@ FSNodeGetOrCreateFileVNodeByID(vnode_t               *vnPtr,
                 *oflags |= MAKEENTRY;
             }
             HNodeAttachVNodeSucceeded(hn, 0 /* forkIndex */, vn);
-            OSIncrementAtomic((SInt32 *)&fuse_vnodes_current);
+            OSIncrementAtomic(&fuse_vnodes_current);
         } else {
             if (HNodeAttachVNodeFailed(hn, 0 /* forkIndex */)) {
                 FSNodeScrub(fvdat);

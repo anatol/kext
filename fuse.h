@@ -132,7 +132,7 @@ FUSE_OSMalloc(size_t size, OSMallocTag tag)
         panic("fuse4x: memory allocation failed (size=%lu)", size);
     }
 
-    OSAddAtomic((UInt32)size, (SInt32 *)&fuse_memory_allocated);
+    OSAddAtomic((UInt32)size, &fuse_memory_allocated);
 
     return addr;
 }
@@ -143,7 +143,7 @@ FUSE_OSFree(void *addr, size_t size, OSMallocTag tag)
 {
     OSFree(addr, (uint32_t)size, tag);
 
-    OSAddAtomic(-(UInt32)(size), (SInt32 *)&fuse_memory_allocated);
+    OSAddAtomic(-(UInt32)(size), &fuse_memory_allocated);
 }
 
 #else

@@ -72,7 +72,7 @@ fuse_filehandle_get(vnode_t       vp,
     foi = fdi.indata;
     foi->flags = oflags;
 
-    OSIncrementAtomic((SInt32 *)&fuse_fh_upcall_count);
+    OSIncrementAtomic(&fuse_fh_upcall_count);
     if ((err = fuse_dispatcher_wait_answer(&fdi))) {
         const char *vname = vnode_getname(vp);
         if (err == ENOENT) {
@@ -100,7 +100,7 @@ fuse_filehandle_get(vnode_t       vp,
         }
         return err;
     }
-    OSIncrementAtomic((SInt32 *)&fuse_fh_current);
+    OSIncrementAtomic(&fuse_fh_current);
 
     foo = fdi.answer;
 
@@ -167,7 +167,7 @@ fuse_filehandle_put(vnode_t vp, vfs_context_t context, fufh_type_t fufh_type)
     }
 
 out:
-    OSDecrementAtomic((SInt32 *)&fuse_fh_current);
+    OSDecrementAtomic(&fuse_fh_current);
     fuse_invalidate_attr(vp);
 
     return err;

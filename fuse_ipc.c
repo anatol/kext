@@ -56,7 +56,7 @@ FUSE_OSRealloc_nocopy(void *oldptr, size_t oldsize, size_t newsize)
     }
 
     FUSE_OSFree(oldptr, oldsize, fuse_malloc_tag);
-    OSIncrementAtomic((SInt32 *)&fuse_realloc_count);
+    OSIncrementAtomic(&fuse_realloc_count);
 
     return data;
 }
@@ -72,7 +72,7 @@ FUSE_OSRealloc_nocopy_canfail(void *oldptr, size_t oldsize, size_t newsize)
         goto out;
     } else {
         FUSE_OSFree(oldptr, oldsize, fuse_malloc_tag);
-        OSIncrementAtomic((SInt32 *)&fuse_realloc_count);
+        OSIncrementAtomic(&fuse_realloc_count);
     }
 
 out:
@@ -91,7 +91,7 @@ fiov_init(struct fuse_iov *fiov, size_t size)
         panic("fuse4x: OSMalloc failed in fiov_init");
     }
 
-    OSIncrementAtomic((SInt32 *)&fuse_iov_current);
+    OSIncrementAtomic(&fuse_iov_current);
 
     bzero(fiov->base, msize);
 
@@ -105,7 +105,7 @@ fiov_teardown(struct fuse_iov *fiov)
     FUSE_OSFree(fiov->base, fiov->allocated_size, fuse_malloc_tag);
     fiov->allocated_size = 0;
 
-    OSDecrementAtomic((SInt32 *)&fuse_iov_current);
+    OSDecrementAtomic(&fuse_iov_current);
 }
 
 void
@@ -174,7 +174,7 @@ fuse_ticket_alloc(struct fuse_data *data)
         panic("fuse4x: OSMalloc failed in " __FUNCTION__);
     }
 
-    OSIncrementAtomic((SInt32 *)&fuse_tickets_current);
+    OSIncrementAtomic(&fuse_tickets_current);
 
     bzero(ticket, sizeof(struct fuse_ticket));
 
@@ -228,7 +228,7 @@ fuse_ticket_destroy(struct fuse_ticket *ticket)
 
     FUSE_OSFree(ticket, sizeof(struct fuse_ticket), fuse_malloc_tag);
 
-    OSDecrementAtomic((SInt32 *)&fuse_tickets_current);
+    OSDecrementAtomic(&fuse_tickets_current);
 }
 
 static int

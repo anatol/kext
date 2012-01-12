@@ -476,7 +476,7 @@ bringup:
          */
         fufh->open_count = 1;
 
-        OSIncrementAtomic((SInt32 *)&fuse_fh_current);
+        OSIncrementAtomic(&fuse_fh_current);
     }
 
     cache_purge_negatives(dvp);
@@ -1310,15 +1310,15 @@ fuse_vnop_lookup(struct vnop_lookup_args *ap)
                 fuse_vncache_purge(*vpp);
                 vnode_put(*vpp);
                 *vpp = NULL;
-                OSIncrementAtomic((SInt32 *)&fuse_lookup_cache_overrides);
+                OSIncrementAtomic(&fuse_lookup_cache_overrides);
                 err = 0;
                 break; /* pretend it's a miss */
             }
-            OSIncrementAtomic((SInt32 *)&fuse_lookup_cache_hits);
+            OSIncrementAtomic(&fuse_lookup_cache_hits);
             return 0;
 
         case 0: /* no match in cache (or aged out) */
-            OSIncrementAtomic((SInt32 *)&fuse_lookup_cache_misses);
+            OSIncrementAtomic(&fuse_lookup_cache_misses);
             break;
 
         case ENOENT: /* negative match */
@@ -1681,7 +1681,7 @@ retry:
 
     if (FUFH_IS_VALID(fufh)) {
         FUFH_USE_INC(fufh);
-        OSIncrementAtomic((SInt32 *)&fuse_fh_reuse_count);
+        OSIncrementAtomic(&fuse_fh_reuse_count);
         goto out;
     }
 
@@ -1940,7 +1940,7 @@ fuse_vnop_open(struct vnop_open_args *ap)
 
     if (FUFH_IS_VALID(fufh)) {
         FUFH_USE_INC(fufh);
-        OSIncrementAtomic((SInt32 *)&fuse_fh_reuse_count);
+        OSIncrementAtomic(&fuse_fh_reuse_count);
         goto ok; /* return 0 */
     }
 
@@ -2441,7 +2441,7 @@ fuse_vnop_readdir(struct vnop_readdir_args *ap)
         }
         freefufh = 1;
     } else {
-        OSIncrementAtomic((SInt32 *)&fuse_fh_reuse_count);
+        OSIncrementAtomic(&fuse_fh_reuse_count);
     }
 
 #define DIRCOOKEDSIZE FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + MAXNAMLEN + 1)
@@ -2606,7 +2606,7 @@ fuse_vnop_reclaim(struct vnop_reclaim_args *ap)
                             vnode_putname(vname);
                         }
                     } /* if counts did not match (both=1 for match currently) */
-                    OSIncrementAtomic((SInt32 *)&fuse_fh_zombies);
+                    OSIncrementAtomic(&fuse_fh_zombies);
                 } /* !deadfs */
 
                 (void)fuse_filehandle_put(vp, context, type);
@@ -2628,7 +2628,7 @@ fuse_vnop_reclaim(struct vnop_reclaim_args *ap)
     if (HNodeDetachVNode(hn, vp)) {
         FSNodeScrub(fvdat);
         HNodeScrubDone(hn);
-        OSDecrementAtomic((SInt32 *)&fuse_vnodes_current);
+        OSDecrementAtomic(&fuse_vnodes_current);
     }
 
     return 0;
