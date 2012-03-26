@@ -10,15 +10,13 @@
 #include "fuse_node.h"
 #include "fuse_sysctl.h"
 
-#ifdef FUSE4X_ENABLE_BIGLOCK
-#include "fuse_biglock_vnops.h"
-#endif
-
 /*
  * Because of the vagaries of how a filehandle can be used, we try not to
  * be too smart in here (we try to be smart elsewhere). It is required that
  * you come in here only if you really do not have the said filehandle--else
  * we panic.
+ *
+ * This function should be called with fufh_mtx mutex locked.
  */
 int
 fuse_filehandle_get(vnode_t       vp,
@@ -92,14 +90,7 @@ fuse_filehandle_get(vnode_t       vp,
             vnode_putname(vname);
         }
         if (err == ENOENT) {
-#ifdef FUSE4X_ENABLE_BIGLOCK
-            struct fuse_data *data = fuse_get_mpdata(vnode_mount(vp));
-            fuse_biglock_unlock(data->biglock);
-#endif
             fuse_vncache_purge(vp);
-#ifdef FUSE4X_ENABLE_BIGLOCK
-            fuse_biglock_lock(data->biglock);
-#endif
         }
         return err;
     }
