@@ -465,12 +465,21 @@ fuse_internal_attr_fat2vat(vnode_t            vp,
     VATTR_RETURN(vap, va_fileid, fat->ino);
     VATTR_RETURN(vap, va_linkid, fat->ino);
 
+    /* Right after a file copying Finder checks size of the written file.
+     * With simple-lock it became possible that VNOP_STRATEGY still in-flight
+     * when getattr is issues to the fuse filesystem.
+     * Because not the whole file is still written to user-space then fuse most likely
+     * will report size of half-copied file. Finder does not like it and crashes
+     * copying.
+     * Enable file size caching to prevent this Finder issue.
+     */
+    bool enable_size_caching = true;
     /*
      * If we have asynchronous writes enabled, our local in-kernel size
      * takes precedence over what the daemon thinks.
      */
     /* ATTR_FUDGE_CASE */
-    if (!vfs_issynchronous(mp)) {
+    if (enable_size_caching || !vfs_issynchronous(mp)) {
         fat->size = fvdat->filesize;
     }
     VATTR_RETURN(vap, va_data_size, fat->size);
