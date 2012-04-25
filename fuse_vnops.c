@@ -783,6 +783,11 @@ fuse_vnop_getattr(struct vnop_getattr_args *ap)
     if ((attr_out->attr.mode & S_IFMT) == 0) {
         return EIO;
     }
+    if (!VTOFUD(vp)) {
+        // Why vnode does not have data here? Does it mean that it was reclaimed while userspace fs processed GETATTR?
+        // TODO fix this workaround, do we need to vnode_get/put here and everywhere else?
+        return EIO;
+    }
 
     cache_attrs(vp, attr_out);
 
@@ -1158,7 +1163,7 @@ fuse_vnop_lookup(struct vnop_lookup_args *ap)
     int err                   = 0;
     int lookup_err            = 0;
     vnode_t vp                = NULL;
-    vnode_t pdp               = (vnode_t)NULL;
+    vnode_t pdp               = NULL;
     uint64_t size             = FUSE_ZERO_SIZE;
 
     struct fuse_dispatcher fdi;
@@ -1192,6 +1197,11 @@ fuse_vnop_lookup(struct vnop_lookup_args *ap)
         return ENAMETOOLONG;
     }
 
+    if (!VTOFUD(dvp)) {
+        // TODO: the same hack as for GETATTR
+        return EIO;
+    }
+
     if (flags & ISDOTDOT) {
         isdotdot = true;
     } else if ((cnp->cn_nameptr[0] == '.') && (cnp->cn_namelen == 1)) {
@@ -1200,6 +1210,10 @@ fuse_vnop_lookup(struct vnop_lookup_args *ap)
 
     if (isdotdot) {
         pdp = VTOFUD(dvp)->parentvp;
+        if (!VTOFUD(pdp)) {
+            // TODO: the same hack as for GETATTR
+            return EIO;
+        }
         nodeid = VTOI(pdp);
         parent_nodeid = VTOFUD(dvp)->parent_nodeid;
         fuse_dispatcher_init(&fdi, sizeof(struct fuse_getattr_in));
@@ -1368,14 +1382,16 @@ calldaemon:
 
         if (isdotdot) {
             err = vnode_get(pdp);
-            if (err == 0) {
-                *vpp = pdp;
-            }
+            if (err)
+                goto out;
+
+            *vpp = pdp;
         } else if (isdot) { /* nodeid == VTOI(dvp) */
             err = vnode_get(dvp);
-            if (err == 0) {
-                *vpp = dvp;
-            }
+            if (err)
+                goto out;
+
+            *vpp = dvp;
         } else {
             if ((err  = fuse_vget_i(&vp, feo, cnp, dvp,
                                     mp, context))) {
